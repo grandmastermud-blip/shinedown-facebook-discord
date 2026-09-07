@@ -23,17 +23,29 @@ def save_state(state):
 def clean_url(url):
     if not url:
         return None
-    match = re.search(r"(https://www\.facebook\.com/Shinedown/posts/pfbid[^?]+)", url)
+
+    url = url.replace("&amp;", "&")
+
+    match = re.search(
+        r"https://www\.facebook\.com/Shinedown/posts/pfbid[a-zA-Z0-9]+",
+        url
+    )
+
     if match:
-        return match.group(1)
-    return url
+        return match.group(0)
+
+    return None
 
 def get_post_id(url, text):
     if url:
         match = re.search(r"pfbid[a-zA-Z0-9]+", url)
+
         if match:
             return match.group(0)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+
+    return hashlib.sha256(
+        text.encode("utf-8")
+    ).hexdigest()[:20]
 
 def send_to_discord(text, url, image_url=None):
     embed = {
@@ -68,45 +80,73 @@ def send_to_discord(text, url, image_url=None):
 
     return response.status_code < 300
 
+def find_post_links(page):
+    for attempt in range(3):
+        print("Searching for Facebook post links, attempt", attempt + 1)
+
+        links = page.locator("a[href*='/posts/pfbid']")
+        count = links.count()
+
+        print("Post links found:", count)
+
+        if count > 0:
+            return links
+
+        page.wait_for_timeout(5000)
+
+        page.reload(
+            wait_until="domcontentloaded",
+            timeout=60000
+        )
+
+        page.wait_for_timeout(10000)
+
+        page.mouse.wheel(0, 2000)
+        page.wait_for_timeout(5000)
+
+    return page.locator("a[href*='/posts/pfbid']")
+
 def extract_posts(page):
     posts = []
 
-    links = page.locator("a[href*='/Shinedown/posts/pfbid']")
+    links = find_post_links(page)
     count = links.count()
 
-    print("Post links found:", count)
+    print("Final post link count:", count)
 
     seen = set()
 
     for i in range(count):
         try:
             link = links.nth(i)
+
             href = link.get_attribute("href")
-
-            if not href:
-                continue
-
             url = clean_url(href)
 
-            if not url or url in seen:
+            if not url:
+                continue
+
+            if url in seen:
                 continue
 
             seen.add(url)
 
-            best_container = None
-            best_text = ""
-
             container = link
 
-            for level in range(1, 15):
+            best_text = ""
+            best_container = None
+
+            for level in range(1, 16):
                 try:
                     container = container.locator("..")
-                    text = container.inner_text(timeout=2000).strip()
 
-                    if 100 < len(text) < 10000:
-                        if len(text) > len(best_text):
-                            best_text = text
-                            best_container = container
+                    text = container.inner_text(
+                        timeout=2000
+                    ).strip()
+
+                    if len(text) > len(best_text) and len(text) < 15000:
+                        best_text = text
+                        best_container = container
 
                 except:
                     break
@@ -114,20 +154,18 @@ def extract_posts(page):
             if not best_container:
                 continue
 
-            text = best_text
-
-            text = re.sub(r"\n+", "\n", text)
+            text = re.sub(r"\n+", "\n", best_text)
             text = text.strip()
 
-            lines = [x.strip() for x in text.split("\n") if x.strip()]
+            lines = []
 
-            filtered = []
+            for line in text.split("\n"):
+                line = line.strip()
 
-            for line in lines:
-                if line not in filtered:
-                    filtered.append(line)
+                if line and line not in lines:
+                    lines.append(line)
 
-            text = "\n".join(filtered)
+            text = "\n".join(lines)
 
             if len(text) < 20:
                 continue
@@ -137,9 +175,8 @@ def extract_posts(page):
             image_url = None
 
             images = best_container.locator("img")
-            image_count = images.count()
 
-            for j in range(image_count):
+            for j in range(images.count()):
                 try:
                     src = images.nth(j).get_attribute("src")
 
@@ -150,8 +187,8 @@ def extract_posts(page):
                     pass
 
             print("Found post:", post_id)
-            print("Post text:", text[:500])
-            print("Post URL:", url)
+            print("URL:", url)
+            print("Text:", text[:500])
 
             posts.append({
                 "id": post_id,
@@ -197,7 +234,17 @@ with sync_playwright() as p:
 
     page.wait_for_timeout(10000)
 
+    body_text = page.locator("body").inner_text()
+
+    print("Page text length:", len(body_text))
+
+    if "Young Again" in body_text:
+        print("Young Again is visible on the page.")
+    else:
+        print("Young Again is NOT visible on the page.")
+
     page.mouse.wheel(0, 2500)
+
     page.wait_for_timeout(5000)
 
     state = load_state()
