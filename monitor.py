@@ -49,29 +49,32 @@ def get_post_id(url, text):
 
 def clean_post_text(text):
     text = text.replace("\ufeff", "")
-    text = text.replace("See more", "")
-    text = text.replace("See less", "")
+    text = text.replace("\u00a0", " ")
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-
-    cleaned = []
-
-    junk_exact = {
-        "Like",
-        "Comment",
-        "Share",
-        "View more comments",
+    cutoff_markers = [
         "All reactions:",
-        "Top fan",
-        "Shinedown",
-        "·"
-    }
+        "Like\nComment",
+        "Like\nComment\nShare",
+        "View more comments",
+        "Top fan"
+    ]
 
-    for line in lines:
-        if line in junk_exact:
+    for marker in cutoff_markers:
+        if marker in text:
+            text = text.split(marker, 1)[0]
+
+    lines = []
+
+    for line in text.splitlines():
+        line = line.strip()
+
+        if not line:
             continue
 
-        if re.match(r"^[\d,.]+[KMB]?$", line):
+        if line == "Shinedown":
+            continue
+
+        if line == "·":
             continue
 
         if re.match(r"^\d+[smhdwy]$", line):
@@ -80,29 +83,28 @@ def clean_post_text(text):
         if line.startswith("All reactions"):
             continue
 
-        if line.startswith("View more"):
+        if line in ["Like", "Comment", "Share"]:
             continue
 
-        cleaned.append(line)
+        if line == "See more":
+            continue
 
-    while cleaned and cleaned[0] == "Shinedown":
-        cleaned.pop(0)
+        if line == "See less":
+            continue
 
-    if cleaned:
-        time_pattern = r"^\d+[smhdwy]$"
+        if line == "…":
+            continue
 
-        if re.match(time_pattern, cleaned[0]):
-            cleaned.pop(0)
+        lines.append(line)
 
-    result = "\n".join(cleaned)
+    while lines and lines[0] in ["Young Again", "Shinedown", "·"]:
+        lines.pop(0)
 
-    result = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        result
-    )
+    text = "\n".join(lines)
 
-    return result.strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
 
 def find_post_links(page):
     for attempt in range(3):
@@ -190,7 +192,8 @@ def extract_posts(page):
 
             for j in range(images.count()):
                 try:
-                    src = images.nth(j).get_attribute("src")
+                    image = images.nth(j)
+                    src = image.get_attribute("src")
 
                     if not src:
                         continue
@@ -204,8 +207,8 @@ def extract_posts(page):
                     if "static.xx.fbcdn.net" in src:
                         continue
 
-                    width = images.nth(j).get_attribute("width")
-                    height = images.nth(j).get_attribute("height")
+                    width = image.get_attribute("width")
+                    height = image.get_attribute("height")
 
                     if width and height:
                         try:
@@ -220,13 +223,32 @@ def extract_posts(page):
                 except:
                     pass
 
+            title = "Shinedown posted on Facebook"
+
+            first_line = text.split("\n")[0].strip()
+
+            if len(first_line) <= 100 and (
+                "!" in first_line
+                or "?" in first_line
+                or '"' in first_line
+                or "'" in first_line
+            ):
+                title = first_line
+
+                remaining = text.split("\n", 1)
+
+                if len(remaining) > 1:
+                    text = remaining[1].strip()
+
             print("Found post:", post_id)
+            print("Title:", title)
             print("Text:", text[:500])
             print("Image:", image_url)
 
             posts.append({
                 "id": post_id,
                 "url": url,
+                "title": title,
                 "text": text,
                 "image": image_url
             })
@@ -243,14 +265,14 @@ def send_to_discord(post):
         text = text[:3897] + "..."
 
     embed = {
+        "title": post["title"],
+        "description": text,
+        "url": post["url"],
         "author": {
             "name": "Shinedown"
         },
-        "title": "New Facebook Post",
-        "description": text,
-        "url": post["url"],
         "footer": {
-            "text": "Shinedown • Facebook"
+            "text": "Facebook • Shinedown"
         }
     }
 
