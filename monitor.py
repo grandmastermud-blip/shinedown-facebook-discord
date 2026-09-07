@@ -47,38 +47,62 @@ def get_post_id(url, text):
         text.encode("utf-8")
     ).hexdigest()[:20]
 
-def send_to_discord(text, url, image_url=None):
-    embed = {
-        "title": "New Shinedown Facebook Post",
-        "description": text[:4000],
-        "url": url,
-        "footer": {
-            "text": "Shinedown • Facebook"
-        }
+def clean_post_text(text):
+    text = text.replace("\ufeff", "")
+    text = text.replace("See more", "")
+    text = text.replace("See less", "")
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    cleaned = []
+
+    junk_exact = {
+        "Like",
+        "Comment",
+        "Share",
+        "View more comments",
+        "All reactions:",
+        "Top fan",
+        "Shinedown",
+        "·"
     }
 
-    if image_url:
-        embed["image"] = {
-            "url": image_url
-        }
+    for line in lines:
+        if line in junk_exact:
+            continue
 
-    payload = {
-        "username": "Shinedown",
-        "embeds": [embed]
-    }
+        if re.match(r"^[\d,.]+[KMB]?$", line):
+            continue
 
-    response = requests.post(
-        DISCORD_WEBHOOK,
-        json=payload,
-        timeout=30
+        if re.match(r"^\d+[smhdwy]$", line):
+            continue
+
+        if line.startswith("All reactions"):
+            continue
+
+        if line.startswith("View more"):
+            continue
+
+        cleaned.append(line)
+
+    while cleaned and cleaned[0] == "Shinedown":
+        cleaned.pop(0)
+
+    if cleaned:
+        time_pattern = r"^\d+[smhdwy]$"
+
+        if re.match(time_pattern, cleaned[0]):
+            cleaned.pop(0)
+
+    result = "\n".join(cleaned)
+
+    result = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        result
     )
 
-    print("Discord response:", response.status_code)
-
-    if response.status_code >= 300:
-        print(response.text)
-
-    return response.status_code < 300
+    return result.strip()
 
 def find_post_links(page):
     for attempt in range(3):
@@ -101,7 +125,7 @@ def find_post_links(page):
 
         page.wait_for_timeout(10000)
 
-        page.mouse.wheel(0, 2000)
+        page.mouse.wheel(0, 2500)
         page.wait_for_timeout(5000)
 
     return page.locator("a[href*='/posts/pfbid']")
@@ -132,7 +156,6 @@ def extract_posts(page):
             seen.add(url)
 
             container = link
-
             best_text = ""
             best_container = None
 
@@ -154,20 +177,9 @@ def extract_posts(page):
             if not best_container:
                 continue
 
-            text = re.sub(r"\n+", "\n", best_text)
-            text = text.strip()
+            text = clean_post_text(best_text)
 
-            lines = []
-
-            for line in text.split("\n"):
-                line = line.strip()
-
-                if line and line not in lines:
-                    lines.append(line)
-
-            text = "\n".join(lines)
-
-            if len(text) < 20:
+            if len(text) < 10:
                 continue
 
             post_id = get_post_id(url, text)
@@ -180,15 +192,37 @@ def extract_posts(page):
                 try:
                     src = images.nth(j).get_attribute("src")
 
-                    if src and "fbcdn.net" in src:
-                        image_url = src
-                        break
+                    if not src:
+                        continue
+
+                    if "fbcdn.net" not in src:
+                        continue
+
+                    if "emoji" in src.lower():
+                        continue
+
+                    if "static.xx.fbcdn.net" in src:
+                        continue
+
+                    width = images.nth(j).get_attribute("width")
+                    height = images.nth(j).get_attribute("height")
+
+                    if width and height:
+                        try:
+                            if int(width) < 100 or int(height) < 100:
+                                continue
+                        except:
+                            pass
+
+                    image_url = src
+                    break
+
                 except:
                     pass
 
             print("Found post:", post_id)
-            print("URL:", url)
             print("Text:", text[:500])
+            print("Image:", image_url)
 
             posts.append({
                 "id": post_id,
@@ -201,6 +235,47 @@ def extract_posts(page):
             print("Error processing post:", e)
 
     return posts
+
+def send_to_discord(post):
+    text = post["text"]
+
+    if len(text) > 3900:
+        text = text[:3897] + "..."
+
+    embed = {
+        "author": {
+            "name": "Shinedown"
+        },
+        "title": "New Facebook Post",
+        "description": text,
+        "url": post["url"],
+        "footer": {
+            "text": "Shinedown • Facebook"
+        }
+    }
+
+    if post["image"]:
+        embed["image"] = {
+            "url": post["image"]
+        }
+
+    payload = {
+        "username": "Shinedown",
+        "embeds": [embed]
+    }
+
+    response = requests.post(
+        DISCORD_WEBHOOK,
+        json=payload,
+        timeout=30
+    )
+
+    print("Discord response:", response.status_code)
+
+    if response.status_code >= 300:
+        print(response.text)
+
+    return response.status_code < 300
 
 with sync_playwright() as p:
     browser = p.chromium.launch(
@@ -234,17 +309,7 @@ with sync_playwright() as p:
 
     page.wait_for_timeout(10000)
 
-    body_text = page.locator("body").inner_text()
-
-    print("Page text length:", len(body_text))
-
-    if "Young Again" in body_text:
-        print("Young Again is visible on the page.")
-    else:
-        print("Young Again is NOT visible on the page.")
-
     page.mouse.wheel(0, 2500)
-
     page.wait_for_timeout(5000)
 
     state = load_state()
@@ -265,11 +330,7 @@ with sync_playwright() as p:
     for post in reversed(new_posts):
         print("Sending:", post["url"])
 
-        success = send_to_discord(
-            post["text"],
-            post["url"],
-            post["image"]
-        )
+        success = send_to_discord(post)
 
         if success:
             known_posts.add(post["id"])
