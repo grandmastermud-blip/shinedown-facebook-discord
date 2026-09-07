@@ -1,7 +1,155 @@
 import os
+import json
+import re
+import hashlib
+import requests
 from playwright.sync_api import sync_playwright
 
 FACEBOOK_URL = "https://www.facebook.com/Shinedown/"
+STATE_FILE = "state.json"
+DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {"posts": []}
+
+def save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+def clean_url(url):
+    if not url:
+        return None
+    match = re.search(r"(https://www\.facebook\.com/Shinedown/posts/pfbid[^?]+)", url)
+    if match:
+        return match.group(1)
+    return url
+
+def get_post_id(url, text):
+    if url:
+        match = re.search(r"pfbid[a-zA-Z0-9]+", url)
+        if match:
+            return match.group(0)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+
+def send_to_discord(text, url, image_url=None):
+    embed = {
+        "title": "New Shinedown Facebook Post",
+        "description": text[:4000],
+        "url": url,
+        "footer": {
+            "text": "Shinedown • Facebook"
+        }
+    }
+
+    if image_url:
+        embed["image"] = {
+            "url": image_url
+        }
+
+    payload = {
+        "username": "Shinedown",
+        "embeds": [embed]
+    }
+
+    response = requests.post(
+        DISCORD_WEBHOOK,
+        json=payload,
+        timeout=30
+    )
+
+    print("Discord response:", response.status_code)
+
+    if response.status_code >= 300:
+        print(response.text)
+
+    return response.status_code < 300
+
+def extract_posts(page):
+    posts = []
+
+    links = page.locator("a[href*='/Shinedown/posts/pfbid']")
+    count = links.count()
+
+    print("Post links found:", count)
+
+    seen = set()
+
+    for i in range(count):
+        try:
+            link = links.nth(i)
+
+            href = link.get_attribute("href")
+
+            if not href:
+                continue
+
+            url = clean_url(href)
+
+            if not url or url in seen:
+                continue
+
+            seen.add(url)
+
+            container = link
+
+            for _ in range(8):
+                try:
+                    parent = container.locator("..")
+                    text = parent.inner_text(timeout=2000)
+
+                    if len(text) > 100:
+                        container = parent
+                    else:
+                        break
+                except:
+                    break
+
+            text = container.inner_text(timeout=3000)
+
+            text = re.sub(r"\n+", "\n", text)
+            text = text.strip()
+
+            lines = [x.strip() for x in text.split("\n") if x.strip()]
+
+            filtered = []
+
+            for line in lines:
+                if line not in filtered:
+                    filtered.append(line)
+
+            text = "\n".join(filtered)
+
+            if "Shinedown" in text and len(text) > 20:
+                image_url = None
+
+                images = container.locator("img")
+                image_count = images.count()
+
+                for j in range(image_count):
+                    try:
+                        src = images.nth(j).get_attribute("src")
+
+                        if src and "fbcdn.net" in src:
+                            image_url = src
+                            break
+                    except:
+                        pass
+
+                posts.append({
+                    "id": get_post_id(url, text),
+                    "url": url,
+                    "text": text,
+                    "image": image_url
+                })
+
+        except Exception as e:
+            print("Error processing post:", e)
+
+    return posts
 
 with sync_playwright() as p:
     browser = p.chromium.launch(
@@ -35,53 +183,43 @@ with sync_playwright() as p:
 
     page.wait_for_timeout(10000)
 
-    body_text = page.locator("body").inner_text()
+    page.mouse.wheel(0, 2500)
+    page.wait_for_timeout(5000)
 
-    print("Page text length:", len(body_text))
+    state = load_state()
+    known_posts = set(state.get("posts", []))
 
-    if "Young Again" in body_text:
-        print("Found Young Again in page text.")
+    posts = extract_posts(page)
 
-        locator = page.get_by_text("Young Again", exact=False)
+    print("Posts extracted:", len(posts))
 
-        print("Young Again matches:", locator.count())
+    if not posts:
+        print("No posts found.")
 
-        if locator.count() > 0:
-            element = locator.first
+    new_posts = []
 
-            print("Element tag:", element.evaluate("(e) => e.tagName"))
-            print("Element text:", element.inner_text())
+    for post in posts:
+        if post["id"] not in known_posts:
+            new_posts.append(post)
 
-            html = element.evaluate(
-                "(e) => e.parentElement.parentElement.outerHTML"
-            )
+    print("New posts:", len(new_posts))
 
-            print("HTML around Young Again:")
-            print(html[:15000])
+    for post in reversed(new_posts):
+        print("Sending:", post["url"])
 
-    else:
-        print("Young Again was NOT found.")
+        success = send_to_discord(
+            post["text"],
+            post["url"],
+            post["image"]
+        )
 
-    print("All links containing posts/photos/videos:")
+        if success:
+            known_posts.add(post["id"])
 
-    links = page.locator("a").all()
+    state["posts"] = list(known_posts)[-100:]
 
-    count = 0
-
-    for link in links:
-        try:
-            href = link.get_attribute("href")
-
-            if href and any(
-                x in href
-                for x in ["/posts/", "/photos/", "/videos/", "/reel/"]
-            ):
-                print(href)
-                count += 1
-
-        except Exception:
-            pass
-
-    print("Matching links:", count)
+    save_state(state)
 
     browser.close()
+
+print("Done.")
