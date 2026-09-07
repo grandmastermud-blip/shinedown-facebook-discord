@@ -81,7 +81,6 @@ def extract_posts(page):
     for i in range(count):
         try:
             link = links.nth(i)
-
             href = link.get_attribute("href")
 
             if not href:
@@ -94,21 +93,28 @@ def extract_posts(page):
 
             seen.add(url)
 
+            best_container = None
+            best_text = ""
+
             container = link
 
-            for _ in range(8):
+            for level in range(1, 15):
                 try:
-                    parent = container.locator("..")
-                    text = parent.inner_text(timeout=2000)
+                    container = container.locator("..")
+                    text = container.inner_text(timeout=2000).strip()
 
-                    if len(text) > 100:
-                        container = parent
-                    else:
-                        break
+                    if 100 < len(text) < 10000:
+                        if len(text) > len(best_text):
+                            best_text = text
+                            best_container = container
+
                 except:
                     break
 
-            text = container.inner_text(timeout=3000)
+            if not best_container:
+                continue
+
+            text = best_text
 
             text = re.sub(r"\n+", "\n", text)
             text = text.strip()
@@ -123,28 +129,36 @@ def extract_posts(page):
 
             text = "\n".join(filtered)
 
-            if "Shinedown" in text and len(text) > 20:
-                image_url = None
+            if len(text) < 20:
+                continue
 
-                images = container.locator("img")
-                image_count = images.count()
+            post_id = get_post_id(url, text)
 
-                for j in range(image_count):
-                    try:
-                        src = images.nth(j).get_attribute("src")
+            image_url = None
 
-                        if src and "fbcdn.net" in src:
-                            image_url = src
-                            break
-                    except:
-                        pass
+            images = best_container.locator("img")
+            image_count = images.count()
 
-                posts.append({
-                    "id": get_post_id(url, text),
-                    "url": url,
-                    "text": text,
-                    "image": image_url
-                })
+            for j in range(image_count):
+                try:
+                    src = images.nth(j).get_attribute("src")
+
+                    if src and "fbcdn.net" in src:
+                        image_url = src
+                        break
+                except:
+                    pass
+
+            print("Found post:", post_id)
+            print("Post text:", text[:500])
+            print("Post URL:", url)
+
+            posts.append({
+                "id": post_id,
+                "url": url,
+                "text": text,
+                "image": image_url
+            })
 
         except Exception as e:
             print("Error processing post:", e)
@@ -192,9 +206,6 @@ with sync_playwright() as p:
     posts = extract_posts(page)
 
     print("Posts extracted:", len(posts))
-
-    if not posts:
-        print("No posts found.")
 
     new_posts = []
 
